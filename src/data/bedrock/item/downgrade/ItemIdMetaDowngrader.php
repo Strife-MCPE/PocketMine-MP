@@ -23,11 +23,15 @@ declare(strict_types=1);
 
 namespace pocketmine\data\bedrock\item\downgrade;
 
+use pocketmine\data\bedrock\item\upgrade\ItemIdMetaUpgrader;
+use pocketmine\data\bedrock\item\upgrade\ItemIdMetaUpgradeSchemaUtils;
 use pocketmine\network\mcpe\protocol\serializer\ItemTypeDictionary;
 use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\Utils;
-use pocketmine\world\format\io\GlobalItemDataHandlers;
+use Symfony\Component\Filesystem\Path;
 use function is_array;
+use const PHP_INT_MAX;
+use const pocketmine\BEDROCK_ITEM_UPGRADE_SCHEMA_PATH;
 
 /**
  * Downgrades new item string IDs to older ones according to the given schemas.
@@ -45,8 +49,23 @@ final class ItemIdMetaDowngrader{
 	 */
 	private array $remappedMetas = [];
 
+	/**
+	 * Loaded directly instead of through GlobalItemDataHandlers::getUpgrader():
+	 * axolotl's getUpgrader() depends on TypeConverter::getInstance(), and this
+	 * class is constructed inside TypeConverter's constructor - going through
+	 * the global handler would recurse infinitely.
+	 */
+	private static ?ItemIdMetaUpgrader $idMetaUpgrader = null;
+
+	private static function getIdMetaUpgrader() : ItemIdMetaUpgrader{
+		return self::$idMetaUpgrader ??= new ItemIdMetaUpgrader(ItemIdMetaUpgradeSchemaUtils::loadSchemas(
+			Path::join(BEDROCK_ITEM_UPGRADE_SCHEMA_PATH, 'id_meta_upgrade_schema'),
+			PHP_INT_MAX
+		));
+	}
+
 	public function __construct(ItemTypeDictionary $dictionary, int $schemaId){
-		$upgrader = GlobalItemDataHandlers::getUpgrader()->getIdMetaUpgrader();
+		$upgrader = self::getIdMetaUpgrader();
 
 		$networkIds = [];
 		foreach($upgrader->getSchemas() as $id => $schema){
