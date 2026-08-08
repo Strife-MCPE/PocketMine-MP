@@ -23,6 +23,10 @@ declare(strict_types=1);
 
 namespace pocketmine\network\mcpe\convert;
 
+use DaveRandom\CallbackValidator\BuiltInTypes;
+use DaveRandom\CallbackValidator\CallbackType;
+use DaveRandom\CallbackValidator\ParameterType;
+use DaveRandom\CallbackValidator\ReturnType;
 use pmmp\encoding\ByteBufferReader;
 use pmmp\encoding\ByteBufferWriter;
 use pocketmine\block\tile\Container;
@@ -31,39 +35,46 @@ use pocketmine\crafting\ExactRecipeIngredient;
 use pocketmine\crafting\MetaWildcardRecipeIngredient;
 use pocketmine\crafting\RecipeIngredient;
 use pocketmine\crafting\TagWildcardRecipeIngredient;
-use pocketmine\data\bedrock\BedrockDataFiles;
 use pocketmine\data\bedrock\item\BlockItemIdMap;
+use pocketmine\data\bedrock\item\downgrade\ItemIdMetaDowngrader;
 use pocketmine\data\bedrock\item\ItemTypeNames;
 use pocketmine\data\SavedDataLoadingException;
 use pocketmine\item\Item;
 use pocketmine\item\VanillaItems;
 use pocketmine\nbt\LittleEndianNbtSerializer;
-use pocketmine\nbt\NBT;
 use pocketmine\nbt\NbtException;
 use pocketmine\nbt\tag\CompoundTag;
 use pocketmine\nbt\tag\ListTag;
 use pocketmine\nbt\tag\Tag;
 use pocketmine\nbt\TreeRoot;
 use pocketmine\nbt\UnexpectedTagTypeException;
+use pocketmine\network\mcpe\NetworkBroadcastUtils;
+use pocketmine\network\mcpe\protocol\ClientboundPacket;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\serializer\ItemTypeDictionary;
 use pocketmine\network\mcpe\protocol\types\GameMode as ProtocolGameMode;
 use pocketmine\network\mcpe\protocol\types\inventory\ItemStack;
 use pocketmine\network\mcpe\protocol\types\inventory\ItemStackExtraData;
 use pocketmine\network\mcpe\protocol\types\inventory\ItemStackExtraDataShield;
+use pocketmine\network\mcpe\protocol\types\recipe\IntIdMetaItemDescriptor;
 use pocketmine\network\mcpe\protocol\types\recipe\RecipeIngredient as ProtocolRecipeIngredient;
 use pocketmine\network\mcpe\protocol\types\recipe\StringIdMetaItemDescriptor;
 use pocketmine\network\mcpe\protocol\types\recipe\TagItemDescriptor;
 use pocketmine\player\GameMode;
+use pocketmine\player\Player;
 use pocketmine\utils\AssumptionFailedError;
-use pocketmine\utils\Filesystem;
-use pocketmine\utils\SingletonTrait;
-use pocketmine\world\format\io\GlobalBlockStateHandlers;
+use pocketmine\utils\ProtocolSingletonTrait;
+use pocketmine\utils\Utils;
 use pocketmine\world\format\io\GlobalItemDataHandlers;
+use function count;
 use function get_class;
 use function hash;
+use function spl_object_id;
 
 class TypeConverter{
-	use SingletonTrait;
+	use ProtocolSingletonTrait {
+		ProtocolSingletonTrait::__construct as private __protocolConstruct;
+	}
 
 	private const PM_ID_TAG = "___Id___";
 	private const PM_FULL_NBT_HASH_TAG = "___FullNbtHash___";
@@ -74,22 +85,21 @@ class TypeConverter{
 	private BlockTranslator $blockTranslator;
 	private ItemTranslator $itemTranslator;
 	private ItemTypeDictionary $itemTypeDictionary;
+	private ItemIdMetaDowngrader $itemDataDowngrader;
 	private int $shieldRuntimeId;
 
 	private SkinAdapter $skinAdapter;
 
-	public function __construct(){
+	public function __construct(int $protocolId){
+		$this->__protocolConstruct($protocolId);
+
 		//TODO: inject stuff via constructor
 		$this->blockItemIdMap = BlockItemIdMap::getInstance();
 
-		$canonicalBlockStatesRaw = Filesystem::fileGetContents(BedrockDataFiles::CANONICAL_BLOCK_STATES_NBT);
-		$metaMappingRaw = Filesystem::fileGetContents(BedrockDataFiles::BLOCK_STATE_META_MAP_JSON);
-		$this->blockTranslator = new BlockTranslator(
-			BlockStateDictionary::loadFromString($canonicalBlockStatesRaw, $metaMappingRaw),
-			GlobalBlockStateHandlers::getSerializer()
-		);
+		$this->blockTranslator = BlockTranslator::loadFromProtocolId($protocolId);
 
-		$this->itemTypeDictionary = ItemTypeDictionaryFromDataHelper::loadFromString(Filesystem::fileGetContents(BedrockDataFiles::REQUIRED_ITEM_LIST_JSON));
+		$this->itemTypeDictionary = ItemTypeDictionaryFromDataHelper::loadFromProtocolId($protocolId);
+		$this->itemDataDowngrader = new ItemIdMetaDowngrader($this->itemTypeDictionary, ItemTranslator::getItemSchemaId($protocolId));
 		$this->shieldRuntimeId = $this->itemTypeDictionary->fromStringId(ItemTypeNames::SHIELD);
 
 		$this->itemTranslator = new ItemTranslator(
@@ -97,7 +107,8 @@ class TypeConverter{
 			$this->blockTranslator->getBlockStateDictionary(),
 			GlobalItemDataHandlers::getSerializer(),
 			GlobalItemDataHandlers::getDeserializer(),
-			$this->blockItemIdMap
+			$this->blockItemIdMap,
+			$this->itemDataDowngrader
 		);
 
 		$this->skinAdapter = new LegacySkinAdapter();
@@ -146,9 +157,17 @@ class TypeConverter{
 			return new ProtocolRecipeIngredient(null, 0);
 		}
 		if($ingredient instanceof MetaWildcardRecipeIngredient){
-			$id = $ingredient->getItemId();
-			$meta = self::RECIPE_INPUT_WILDCARD_META;
-			$descriptor = new StringIdMetaItemDescriptor($id, $meta);
+			$oldStringId = $ingredient->getItemId();
+			if($this->protocolId === ProtocolInfo::CURRENT_PROTOCOL){
+				//current protocol clients accept string ID descriptors; no downgrading needed
+				$descriptor = new StringIdMetaItemDescriptor($oldStringId, self::RECIPE_INPUT_WILDCARD_META);
+			}else{
+				[$stringId, $meta] = $this->itemDataDowngrader->downgrade($oldStringId, 0);
+
+				$id = $this->itemTypeDictionary->fromStringId($stringId);
+				$meta = $meta === 0 && $stringId === $oldStringId ? self::RECIPE_INPUT_WILDCARD_META : $meta; // downgrader returns the same meta
+				$descriptor = new IntIdMetaItemDescriptor($id, $meta);
+			}
 		}elseif($ingredient instanceof ExactRecipeIngredient){
 			$item = $ingredient->getItem();
 			[$id, $meta, $blockRuntimeId] = $this->itemTranslator->toNetworkId($item);
@@ -158,8 +177,11 @@ class TypeConverter{
 					throw new AssumptionFailedError("Every block state should have an associated meta value");
 				}
 			}
-			$id = $this->itemTypeDictionary->fromIntId($id);
-			$descriptor = new StringIdMetaItemDescriptor($id, $meta);
+			if($this->protocolId === ProtocolInfo::CURRENT_PROTOCOL){
+				$descriptor = new StringIdMetaItemDescriptor($this->itemTypeDictionary->fromIntId($id), $meta);
+			}else{
+				$descriptor = new IntIdMetaItemDescriptor($id, $meta);
+			}
 		}elseif($ingredient instanceof TagWildcardRecipeIngredient){
 			$descriptor = new TagItemDescriptor($ingredient->getTagName());
 		}else{
@@ -179,7 +201,10 @@ class TypeConverter{
 			return new TagWildcardRecipeIngredient($descriptor->getTag());
 		}
 
-		if($descriptor instanceof StringIdMetaItemDescriptor){
+		if($descriptor instanceof IntIdMetaItemDescriptor){
+			$stringId = $this->itemTypeDictionary->fromIntId($descriptor->getId());
+			$meta = $descriptor->getMeta();
+		}elseif($descriptor instanceof StringIdMetaItemDescriptor){
 			$stringId = $descriptor->getId();
 			$meta = $descriptor->getMeta();
 		}else{
@@ -354,6 +379,48 @@ class TypeConverter{
 		}
 
 		return $itemResult;
+	}
+
+	/**
+	 * @param Player[] $players
+	 *
+	 * @phpstan-return array{array<int, TypeConverter>, array<int, array<int, Player>>}
+	 */
+	public static function sortByConverter(array $players) : array{
+		/** @var TypeConverter[] $typeConverters */
+		$typeConverters = [];
+		/** @var Player[][] $converterRecipients */
+		$converterRecipients = [];
+		foreach($players as $recipient){
+			$typeConverter = $recipient->getNetworkSession()->getTypeConverter();
+			$typeConverters[spl_object_id($typeConverter)] = $typeConverter;
+			$converterRecipients[spl_object_id($typeConverter)][spl_object_id($recipient)] = $recipient;
+		}
+
+		return [
+			$typeConverters,
+			$converterRecipients
+		];
+	}
+
+	/**
+	 * @param Player[] $players
+	 * @phpstan-param \Closure(TypeConverter) : ClientboundPacket[] $closure
+	 */
+	public static function broadcastByTypeConverter(array $players, \Closure $closure) : void{
+		Utils::validateCallableSignature(new CallbackType(
+			new ReturnType(BuiltInTypes::ARRAY, ReturnType::COVARIANT),
+			new ParameterType('typeConverter', TypeConverter::class),
+		), $closure);
+
+		[$typeConverters, $converterRecipients] = self::sortByConverter($players);
+
+		foreach($typeConverters as $key => $typeConverter){
+			$packets = $closure($typeConverter);
+			if(count($packets) > 0){
+				NetworkBroadcastUtils::broadcastPackets($converterRecipients[$key], $packets);
+			}
+		}
 	}
 
 	public function deserializeItemStackExtraData(string $extraData, int $id) : ItemStackExtraData{

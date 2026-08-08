@@ -25,15 +25,16 @@ namespace pocketmine\world\sound;
 
 use pocketmine\block\Block;
 use pocketmine\math\Vector3;
-use pocketmine\network\mcpe\convert\TypeConverter;
 use pocketmine\network\mcpe\protocol\LevelSoundEventPacket;
 use pocketmine\network\mcpe\protocol\types\LevelSoundEvent;
 
-final class ItemUseOnBlockSound implements Sound{
+final class ItemUseOnBlockSound extends BlockSound{
 
 	public function __construct(
 		private Block $block
-	){}
+	){
+		parent::__construct($block);
+	}
 
 	public function getBlock() : Block{ return $this->block; }
 
@@ -42,7 +43,7 @@ final class ItemUseOnBlockSound implements Sound{
 			LevelSoundEvent::ITEM_USE_ON,
 			$pos,
 			false,
-			TypeConverter::getInstance()->getBlockTranslator()->internalIdToNetworkId($this->block->getStateId())
+			$this->toRuntimeId(),
 		)];
 	}
 }

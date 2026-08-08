@@ -308,6 +308,11 @@ class Server{
 	 */
 	private array $broadcastSubscribers = [];
 
+	/** @var array<int, PacketBroadcaster> */
+	private array $packetBroadcasters = [];
+	/** @var array<string, EntityEventBroadcaster> */
+	private array $entityEventBroadcasters = [];
+
 	public function getName() : string{
 		return VersionInfo::NAME;
 	}
@@ -1279,8 +1284,8 @@ class Server{
 		$useQuery = $this->configGroup->getConfigBool(ServerProperties::ENABLE_QUERY, true);
 
 		$typeConverter = TypeConverter::getInstance();
-		$packetBroadcaster = new StandardPacketBroadcaster($this);
-		$entityEventBroadcaster = new StandardEntityEventBroadcaster($packetBroadcaster, $typeConverter);
+		$packetBroadcaster = $this->getPacketBroadcaster(ProtocolInfo::CURRENT_PROTOCOL);
+		$entityEventBroadcaster = $this->getEntityEventBroadcaster($packetBroadcaster, $typeConverter);
 
 		if(
 			!$this->startupPrepareConnectableNetworkInterfaces($this->getIp(), $this->getPort(), false, $useQuery, $packetBroadcaster, $entityEventBroadcaster, $typeConverter) ||
@@ -1429,13 +1434,13 @@ class Server{
 	 *
 	 * @param bool|null $sync Compression on the main thread (true) or workers (false). Default is automatic (null).
 	 */
-	public function prepareBatch(string $buffer, Compressor $compressor, ?bool $sync = null, ?TimingsHandler $timings = null) : CompressBatchPromise|string{
+	public function prepareBatch(string $buffer, int $protocolId, Compressor $compressor, ?bool $sync = null, ?TimingsHandler $timings = null) : CompressBatchPromise|string{
 		$timings ??= Timings::$playerNetworkSendCompress;
 		try{
 			$timings->startTiming();
 
 			$threshold = $compressor->getCompressionThreshold();
-			if($threshold === null || strlen($buffer) < $compressor->getCompressionThreshold()){
+			if(($threshold === null || strlen($buffer) < $compressor->getCompressionThreshold()) && $protocolId >= ProtocolInfo::PROTOCOL_1_20_60){
 				$compressionType = CompressionAlgorithm::NONE;
 				$compressed = $buffer;
 
@@ -1444,7 +1449,7 @@ class Server{
 
 				if(!$sync && strlen($buffer) >= $this->networkCompressionAsyncThreshold){
 					$promise = new CompressBatchPromise();
-					$task = new CompressBatchTask($buffer, $promise, $compressor);
+					$task = new CompressBatchTask($buffer, $promise, $compressor, $protocolId);
 					$this->asyncPool->submitTask($task);
 					return $promise;
 				}
@@ -1453,7 +1458,7 @@ class Server{
 				$compressed = $compressor->compress($buffer);
 			}
 
-			return chr($compressionType) . $compressed;
+			return ($protocolId >= ProtocolInfo::PROTOCOL_1_20_60 ? chr($compressionType) : '') . $compressed;
 		}finally{
 			$timings->stopTiming();
 		}
@@ -1955,5 +1960,13 @@ class Server{
 		}else{
 			$this->nextTick += self::TARGET_SECONDS_PER_TICK;
 		}
+	}
+
+	public function getPacketBroadcaster(int $protocolId) : PacketBroadcaster{
+		return $this->packetBroadcasters[$protocolId] ??= new StandardPacketBroadcaster($this, $protocolId);
+	}
+
+	public function getEntityEventBroadcaster(PacketBroadcaster $packetBroadcaster, TypeConverter $typeConverter) : EntityEventBroadcaster{
+		return $this->entityEventBroadcasters[spl_object_id($packetBroadcaster) . ':' . spl_object_id($typeConverter)] ??= new StandardEntityEventBroadcaster($packetBroadcaster, $typeConverter);
 	}
 }

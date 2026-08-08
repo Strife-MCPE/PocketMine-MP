@@ -23,15 +23,19 @@ declare(strict_types=1);
 
 namespace pocketmine\world\particle;
 
-use pocketmine\math\Vector3;
-use pocketmine\network\mcpe\protocol\LevelEventPacket;
-use pocketmine\network\mcpe\protocol\types\ParticleIds;
+use pocketmine\block\Block;
+use pocketmine\network\mcpe\convert\BlockTranslator;
 
-class BlockForceFieldParticle extends ProtocolParticle{
-	//TODO: proper encode/decode of data
-	public function __construct(private int $data = 0){}
+abstract class BlockParticle implements Particle{
 
-	public function encode(Vector3 $pos) : array{
-		return [LevelEventPacket::standardParticle(ParticleIds::BLOCK_FORCE_FIELD, $this->data, $pos, $this->protocolId)];
+	private BlockTranslator $blockTranslator;
+
+	public function __construct(protected Block $b){}
+
+	public function setBlockTranslator(BlockTranslator $blockTranslator) : void{
+		$this->blockTranslator = $blockTranslator;
+	}
+	public function toRuntimeId() : int{
+		return $this->blockTranslator->internalIdToNetworkId($this->b->getStateId());
 	}
 }

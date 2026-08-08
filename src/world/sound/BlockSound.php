@@ -24,32 +24,19 @@ declare(strict_types=1);
 namespace pocketmine\world\sound;
 
 use pocketmine\block\Block;
-use pocketmine\entity\Entity;
-use pocketmine\math\Vector3;
-use pocketmine\network\mcpe\protocol\LevelSoundEventPacket;
-use pocketmine\network\mcpe\protocol\types\LevelSoundEvent;
+use pocketmine\network\mcpe\convert\BlockTranslator;
 
-/**
- * Played when an entity hits the ground after falling a distance that doesn't cause damage, e.g. due to jumping.
- */
-class EntityLandSound extends BlockSound{
-	public function __construct(
-		private Entity $entity,
-		Block $blockLandedOn
-	){
-		parent::__construct($blockLandedOn);
+abstract class BlockSound implements Sound{
+
+	private BlockTranslator $blockTranslator;
+
+	public function __construct(private Block $block){}
+
+	public function setBlockTranslator(BlockTranslator $blockTranslator) : void{
+		$this->blockTranslator = $blockTranslator;
 	}
 
-	public function encode(Vector3 $pos) : array{
-		return [LevelSoundEventPacket::create(
-			LevelSoundEvent::LAND,
-			$pos,
-			$this->toRuntimeId(),
-			$this->entity::getNetworkTypeId(),
-			false, //TODO: does isBaby have any relevance here?
-			false,
-			$this->entity->getId(),
-			null
-		)];
+	public function toRuntimeId() : int{
+		return $this->blockTranslator->internalIdToNetworkId($this->block->getStateId());
 	}
 }

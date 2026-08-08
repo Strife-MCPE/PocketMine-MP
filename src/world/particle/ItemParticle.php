@@ -23,15 +23,27 @@ declare(strict_types=1);
 
 namespace pocketmine\world\particle;
 
-use pocketmine\math\Vector3;
-use pocketmine\network\mcpe\protocol\LevelEventPacket;
-use pocketmine\network\mcpe\protocol\types\ParticleIds;
+use pocketmine\data\bedrock\item\ItemTypeSerializeException;
+use pocketmine\item\Item;
+use pocketmine\network\mcpe\convert\ItemTranslator;
 
-class BlockForceFieldParticle extends ProtocolParticle{
-	//TODO: proper encode/decode of data
-	public function __construct(private int $data = 0){}
+abstract class ItemParticle implements Particle{
 
-	public function encode(Vector3 $pos) : array{
-		return [LevelEventPacket::standardParticle(ParticleIds::BLOCK_FORCE_FIELD, $this->data, $pos, $this->protocolId)];
+	private ItemTranslator $itemTranslator;
+
+	public function __construct(private Item $item){}
+
+	public function setItemTranslator(ItemTranslator $itemTranslator) : void{
+		$this->itemTranslator = $itemTranslator;
+	}
+
+	/**
+	 * @return int[]
+	 * @phpstan-return array{int, int, int|null}
+	 *
+	 * @throws ItemTypeSerializeException
+	 */
+	public function toNetworkId() : array{
+		return $this->itemTranslator->toNetworkId($this->item);
 	}
 }

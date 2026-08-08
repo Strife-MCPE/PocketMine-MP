@@ -37,6 +37,7 @@ use pocketmine\item\Durable;
 use pocketmine\item\Item;
 use pocketmine\network\mcpe\cache\CraftingDataCache;
 use pocketmine\network\mcpe\InventoryManager;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\types\inventory\ContainerUIIds;
 use pocketmine\network\mcpe\protocol\types\inventory\FullContainerName;
 use pocketmine\network\mcpe\protocol\types\inventory\stackrequest\CraftingConsumeInputStackRequestAction;
@@ -349,7 +350,8 @@ class ItemStackRequestExecutor{
 					$this->setNextCreatedItem($window->getOutput($optionId));
 				}
 			}else{
-				$this->beginCrafting($action->getRecipeId(), $action->getRepetitions());
+				//repetitions are only sent by 1.21.20 and newer clients; older clients always craft one at a time
+				$this->beginCrafting($action->getRecipeId(), $this->player->getNetworkSession()->getProtocolId() >= ProtocolInfo::PROTOCOL_1_21_20 ? $action->getRepetitions() : 1);
 			}
 		}elseif($action instanceof CraftRecipeAutoStackRequestAction){
 			$this->beginCrafting($action->getRecipeId(), $action->getRepetitions());

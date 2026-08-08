@@ -55,6 +55,7 @@ use pocketmine\network\mcpe\protocol\BlockPickRequestPacket;
 use pocketmine\network\mcpe\protocol\BookEditPacket;
 use pocketmine\network\mcpe\protocol\CommandRequestPacket;
 use pocketmine\network\mcpe\protocol\ContainerClosePacket;
+use pocketmine\network\mcpe\protocol\CraftingEventPacket;
 use pocketmine\network\mcpe\protocol\EmotePacket;
 use pocketmine\network\mcpe\protocol\InteractPacket;
 use pocketmine\network\mcpe\protocol\InventoryTransactionPacket;
@@ -70,7 +71,9 @@ use pocketmine\network\mcpe\protocol\NetworkStackLatencyPacket;
 use pocketmine\network\mcpe\protocol\PlayerActionPacket;
 use pocketmine\network\mcpe\protocol\PlayerAuthInputPacket;
 use pocketmine\network\mcpe\protocol\PlayerHotbarPacket;
+use pocketmine\network\mcpe\protocol\PlayerInputPacket;
 use pocketmine\network\mcpe\protocol\PlayerSkinPacket;
+use pocketmine\network\mcpe\protocol\ProtocolInfo;
 use pocketmine\network\mcpe\protocol\RequestChunkRadiusPacket;
 use pocketmine\network\mcpe\protocol\serializer\BitSet;
 use pocketmine\network\mcpe\protocol\SetActorMotionPacket;
@@ -90,7 +93,8 @@ use pocketmine\network\mcpe\protocol\types\inventory\UseItemOnEntityTransactionD
 use pocketmine\network\mcpe\protocol\types\inventory\UseItemTransactionData;
 use pocketmine\network\mcpe\protocol\types\PlayerAction;
 use pocketmine\network\mcpe\protocol\types\PlayerAuthInputFlags;
-use pocketmine\network\mcpe\protocol\types\PlayerBlockAction;
+use pocketmine\network\mcpe\protocol\types\PlayerBlockActionStopBreak;
+use pocketmine\network\mcpe\protocol\types\PlayerBlockActionWithBlockInfo;
 use pocketmine\network\PacketHandlingException;
 use pocketmine\player\Player;
 use pocketmine\utils\AssumptionFailedError;
@@ -119,11 +123,13 @@ use const JSON_THROW_ON_ERROR;
  * This handler handles packets related to general gameplay.
  */
 #[SilentDiscard(ActorEventPacket::class, comment: "Not needed")]
+#[SilentDiscard(CraftingEventPacket::class, comment: "Not needed")]
 #[SilentDiscard(LevelSoundEventPacket::class, comment: "Sounds are always handled server side")]
 #[SilentDiscard(MobArmorEquipmentPacket::class, comment: "Not needed")]
 #[SilentDiscard(MovePlayerPacket::class, comment: "Not needed, noisy debug when landing on ground")]
 #[SilentDiscard(NetworkStackLatencyPacket::class, comment: "Not used, noisy debug")]
 #[SilentDiscard(PlayerHotbarPacket::class, comment: "Not needed")]
+#[SilentDiscard(PlayerInputPacket::class, comment: "Not needed")]
 #[SilentDiscard(SetActorMotionPacket::class, comment: "Not needed, erroneously sent by client when in a vehicle")]
 #[SilentDiscard(SpawnExperienceOrbPacket::class, comment: "XP drops should be server-calculated")]
 class InGamePacketHandler extends PacketHandler{
@@ -279,7 +285,9 @@ class InGamePacketHandler extends PacketHandler{
 			}
 			foreach(Utils::promoteKeys($blockActions) as $k => $blockAction){
 				$actionHandled = false;
-				if($blockAction instanceof PlayerBlockAction){
+				if($blockAction instanceof PlayerBlockActionStopBreak){
+					$actionHandled = $this->handlePlayerActionFromData($blockAction->getActionType(), new BlockPosition(0, 0, 0), Facing::DOWN);
+				}elseif($blockAction instanceof PlayerBlockActionWithBlockInfo){
 					$actionHandled = $this->handlePlayerActionFromData($blockAction->getActionType(), $blockAction->getBlockPosition(), $blockAction->getFace());
 				}
 
@@ -291,7 +299,7 @@ class InGamePacketHandler extends PacketHandler{
 		}
 
 		if($itemStackRequest !== null){
-			$itemStackResponse = $itemStackResponseBuilder?->build() ?? new ItemStackResponse(ItemStackResponse::RESULT_ERROR, $itemStackRequest->getRequestId(), null);
+			$itemStackResponse = $itemStackResponseBuilder?->build() ?? new ItemStackResponse(ItemStackResponse::RESULT_ERROR, $itemStackRequest->getRequestId());
 			$this->session->sendDataPacket(ItemStackResponsePacket::create([$itemStackResponse]));
 		}
 
@@ -478,7 +486,8 @@ class InGamePacketHandler extends PacketHandler{
 				$blockPos = $data->getBlockPosition();
 				$vBlockPos = new Vector3($blockPos->getX(), $blockPos->getY(), $blockPos->getZ());
 				$this->player->interactBlock($vBlockPos, $data->getFace(), $clickPos);
-				if($data->getClientInteractPrediction() === PredictedResult::SUCCESS){
+				//older versions don't predict the outcome of interactions, so we have to sync the blocks unconditionally
+				if($this->session->getProtocolId() < ProtocolInfo::PROTOCOL_1_21_20 || $data->getClientInteractPrediction() === PredictedResult::SUCCESS){
 					//If the item has an associated blockstate ID, this means it will only place one block.
 					//We can avoid syncing the adjacent blocks of the place position in this case, since that's only
 					//necessary if there might be multiple blocks around the placement location affected.
@@ -536,7 +545,7 @@ class InGamePacketHandler extends PacketHandler{
 			}else{
 				$blocks[] = $blockPos;
 			}
-			foreach($this->player->getWorld()->createBlockUpdatePackets($blocks) as $packet){
+			foreach($this->player->getWorld()->createBlockUpdatePackets($this->session->getTypeConverter(), $blocks) as $packet){
 				$this->session->sendDataPacket($packet);
 			}
 		}
@@ -614,7 +623,7 @@ class InGamePacketHandler extends PacketHandler{
 			throw new PacketHandlingException("Too many requests in ItemStackRequestPacket");
 		}
 		foreach($packet->getRequests() as $request){
-			$responses[] = $this->handleSingleItemStackRequest($request)?->build() ?? new ItemStackResponse(ItemStackResponse::RESULT_ERROR, $request->getRequestId(), null);
+			$responses[] = $this->handleSingleItemStackRequest($request)?->build() ?? new ItemStackResponse(ItemStackResponse::RESULT_ERROR, $request->getRequestId());
 		}
 
 		$this->session->sendDataPacket(ItemStackResponsePacket::create($responses));
@@ -769,7 +778,7 @@ class InGamePacketHandler extends PacketHandler{
 
 		try{
 			if(!$block->updateFaceText($this->player, $frontFace, $text)){
-				foreach($this->player->getWorld()->createBlockUpdatePackets([$pos]) as $updatePacket){
+				foreach($this->player->getWorld()->createBlockUpdatePackets($this->session->getTypeConverter(), [$pos]) as $updatePacket){
 					$this->session->sendDataPacket($updatePacket);
 				}
 				return false;

@@ -26,6 +26,10 @@ declare(strict_types=1);
  */
 namespace pocketmine\world;
 
+use DaveRandom\CallbackValidator\BuiltInTypes;
+use DaveRandom\CallbackValidator\CallbackType;
+use DaveRandom\CallbackValidator\ParameterType;
+use DaveRandom\CallbackValidator\ReturnType;
 use pocketmine\block\Air;
 use pocketmine\block\Block;
 use pocketmine\block\BlockTypeIds;
@@ -104,8 +108,13 @@ use pocketmine\world\light\BlockLightUpdate;
 use pocketmine\world\light\LightPopulationTask;
 use pocketmine\world\light\SkyLightUpdate;
 use pocketmine\world\particle\BlockBreakParticle;
+use pocketmine\world\particle\BlockParticle;
+use pocketmine\world\particle\ItemParticle;
 use pocketmine\world\particle\Particle;
+use pocketmine\world\particle\ProtocolParticle;
 use pocketmine\world\sound\BlockPlaceSound;
+use pocketmine\world\sound\BlockSound;
+use pocketmine\world\sound\ProtocolSound;
 use pocketmine\world\sound\Sound;
 use pocketmine\world\utils\SubChunkExplorer;
 use pocketmine\YmlServerProperties;
@@ -268,6 +277,11 @@ class World implements ChunkManager{
 	 * @phpstan-var array<ChunkPosHash, list<ClientboundPacket>>
 	 */
 	private array $packetBuffersByChunk = [];
+	/**
+	 * @var \Closure[][] chunkHash => Closure[]
+	 * @phpstan-var array<ChunkPosHash, list<\Closure(TypeConverter) : ClientboundPacket[]>>
+	 */
+	private array $packetBuffersByChunkTypeConverter = [];
 
 	/**
 	 * @var float[] chunkHash => timestamp of request
@@ -708,14 +722,35 @@ class World implements ChunkManager{
 			$players = $ev->getRecipients();
 		}
 
-		$pk = $sound->encode($pos);
-		if(count($pk) > 0){
-			if($players === $this->getViewersForPosition($pos)){
-				foreach($pk as $e){
-					$this->broadcastPacketToViewers($pos, $e);
-				}
+		if(($blockSound = ($sound instanceof BlockSound)) || $sound instanceof ProtocolSound){
+			if($blockSound){
+				$closure = function(TypeConverter $typeConverter) use ($sound, $pos) : array{
+					$sound->setBlockTranslator($typeConverter->getBlockTranslator());
+					return $sound->encode($pos);
+				};
 			}else{
-				NetworkBroadcastUtils::broadcastPackets($this->filterViewersForPosition($pos, $players), $pk);
+				/** @var ProtocolSound $sound */
+				$closure = function(TypeConverter $typeConverter) use ($sound, $pos) : array{
+					$sound->setProtocolId($typeConverter->getProtocolId());
+					return $sound->encode($pos);
+				};
+			}
+
+			if($players === $this->getViewersForPosition($pos)){
+				$this->broadcastPacketToViewersByTypeConverter($pos, $closure);
+			}else{
+				TypeConverter::broadcastByTypeConverter($this->filterViewersForPosition($pos, $players), $closure);
+			}
+		}else{
+			$pk = $sound->encode($pos);
+			if(count($pk) > 0){
+				if($players === $this->getViewersForPosition($pos)){
+					foreach($pk as $e){
+						$this->broadcastPacketToViewers($pos, $e);
+					}
+				}else{
+					NetworkBroadcastUtils::broadcastPackets($this->filterViewersForPosition($pos, $players), $pk);
+				}
 			}
 		}
 	}
@@ -737,14 +772,34 @@ class World implements ChunkManager{
 			$players = $ev->getRecipients();
 		}
 
-		$pk = $particle->encode($pos);
-		if(count($pk) > 0){
-			if($players === $this->getViewersForPosition($pos)){
-				foreach($pk as $e){
-					$this->broadcastPacketToViewers($pos, $e);
+		if($particle instanceof BlockParticle || $particle instanceof ItemParticle || $particle instanceof ProtocolParticle){
+			$closure = function(TypeConverter $typeConverter) use ($particle, $pos) : array{
+				if($particle instanceof ItemParticle){
+					$particle->setItemTranslator($typeConverter->getItemTranslator());
+				}elseif($particle instanceof ProtocolParticle){
+					$particle->setProtocolId($typeConverter->getProtocolId());
+				}else{
+					$particle->setBlockTranslator($typeConverter->getBlockTranslator());
 				}
+
+				return $particle->encode($pos);
+			};
+
+			if($players === $this->getViewersForPosition($pos)){
+				$this->broadcastPacketToViewersByTypeConverter($pos, $closure);
 			}else{
-				NetworkBroadcastUtils::broadcastPackets($this->filterViewersForPosition($pos, $players), $pk);
+				TypeConverter::broadcastByTypeConverter($this->filterViewersForPosition($pos, $players), $closure);
+			}
+		}else{
+			$pk = $particle->encode($pos);
+			if(count($pk) > 0){
+				if($players === $this->getViewersForPosition($pos)){
+					foreach($pk as $e){
+						$this->broadcastPacketToViewers($pos, $e);
+					}
+				}else{
+					NetworkBroadcastUtils::broadcastPackets($this->filterViewersForPosition($pos, $players), $pk);
+				}
 			}
 		}
 	}
@@ -795,6 +850,30 @@ class World implements ChunkManager{
 	 */
 	public function broadcastPacketToViewers(Vector3 $pos, ClientboundPacket $packet) : void{
 		$this->broadcastPacketToPlayersUsingChunk($pos->getFloorX() >> Chunk::COORD_BIT_SIZE, $pos->getFloorZ() >> Chunk::COORD_BIT_SIZE, $packet);
+	}
+
+	/**
+	 * Broadcasts packets to every player who has the target position within their view distance.
+	 * @phpstan-param \Closure(TypeConverter) : ClientboundPacket[] $closure
+	 */
+	public function broadcastPacketToViewersByTypeConverter(Vector3 $pos, \Closure $closure) : void{
+		$this->broadcastPacketToPlayersByTypeConverterUsingChunk($pos->getFloorX() >> Chunk::COORD_BIT_SIZE, $pos->getFloorZ() >> Chunk::COORD_BIT_SIZE, $closure);
+	}
+
+	/**
+	 * @phpstan-param \Closure(TypeConverter) : ClientboundPacket[] $closure
+	 */
+	private function broadcastPacketToPlayersByTypeConverterUsingChunk(int $chunkX, int $chunkZ, \Closure $closure) : void{
+		Utils::validateCallableSignature(new CallbackType(
+			new ReturnType(BuiltInTypes::ARRAY, ReturnType::COVARIANT),
+			new ParameterType('typeConverter', TypeConverter::class),
+		), $closure);
+
+		if(!isset($this->packetBuffersByChunkTypeConverter[$index = World::chunkHash($chunkX, $chunkZ)])){
+			$this->packetBuffersByChunkTypeConverter[$index] = [$closure];
+		}else{
+			$this->packetBuffersByChunkTypeConverter[$index][] = $closure;
+		}
 	}
 
 	private function broadcastPacketToPlayersUsingChunk(int $chunkX, int $chunkZ, ClientboundPacket $packet) : void{
@@ -1027,9 +1106,7 @@ class World implements ChunkManager{
 							$p->onChunkChanged($chunkX, $chunkZ, $chunk);
 						}
 					}else{
-						foreach($this->createBlockUpdatePackets($blocks) as $packet){
-							$this->broadcastPacketToPlayersUsingChunk($chunkX, $chunkZ, $packet);
-						}
+						$this->broadcastPacketToPlayersByTypeConverterUsingChunk($chunkX, $chunkZ, fn(TypeConverter $typeConverter) : array => $this->createBlockUpdatePackets($typeConverter, $blocks));
 					}
 				}
 			}
@@ -1042,6 +1119,17 @@ class World implements ChunkManager{
 			$this->checkSleep();
 		}
 
+		foreach($this->packetBuffersByChunkTypeConverter as $index => $entries){
+			World::getXZ($index, $chunkX, $chunkZ);
+			TypeConverter::broadcastByTypeConverter($this->getChunkPlayers($chunkX, $chunkZ), function(TypeConverter $typeConverter) use ($index, $entries) : array{
+				return array_merge($this->packetBuffersByChunk[$index] ?? [], ...array_map(function(\Closure $closure) use ($typeConverter) : array{
+					return $closure($typeConverter);
+				}, $entries));
+			});
+
+			unset($this->packetBuffersByChunk[$index]);
+		}
+
 		foreach($this->packetBuffersByChunk as $index => $entries){
 			World::getXZ($index, $chunkX, $chunkZ);
 			$chunkPlayers = $this->getChunkPlayers($chunkX, $chunkZ);
@@ -1051,6 +1139,7 @@ class World implements ChunkManager{
 		}
 
 		$this->packetBuffersByChunk = [];
+		$this->packetBuffersByChunkTypeConverter = [];
 	}
 
 	public function checkSleep() : void{
@@ -1089,10 +1178,10 @@ class World implements ChunkManager{
 	 * @return ClientboundPacket[]
 	 * @phpstan-return list<ClientboundPacket>
 	 */
-	public function createBlockUpdatePackets(array $blocks) : array{
+	public function createBlockUpdatePackets(TypeConverter $typeConverter, array $blocks) : array{
 		$packets = [];
 
-		$blockTranslator = TypeConverter::getInstance()->getBlockTranslator();
+		$blockTranslator = $typeConverter->getBlockTranslator();
 
 		foreach($blocks as $b){
 			if(!($b instanceof Vector3)){
@@ -1128,7 +1217,7 @@ class World implements ChunkManager{
 			);
 
 			if($tile instanceof Spawnable){
-				$packets[] = BlockActorDataPacket::create($blockPosition, $tile->getSerializedSpawnCompound());
+				$packets[] = BlockActorDataPacket::create($blockPosition, $tile->getSerializedSpawnCompound($typeConverter));
 			}
 		}
 

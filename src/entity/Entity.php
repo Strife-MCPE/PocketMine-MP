@@ -29,6 +29,7 @@ namespace pocketmine\entity;
 use pocketmine\block\Block;
 use pocketmine\block\Water;
 use pocketmine\entity\animation\Animation;
+use pocketmine\entity\animation\ItemAnimation;
 use pocketmine\event\entity\EntityDamageEvent;
 use pocketmine\event\entity\EntityDespawnEvent;
 use pocketmine\event\entity\EntityExtinguishEvent;
@@ -46,6 +47,7 @@ use pocketmine\nbt\tag\DoubleTag;
 use pocketmine\nbt\tag\FloatTag;
 use pocketmine\nbt\tag\ListTag;
 use pocketmine\nbt\tag\StringTag;
+use pocketmine\network\mcpe\convert\TypeConverter;
 use pocketmine\network\mcpe\EntityEventBroadcaster;
 use pocketmine\network\mcpe\NetworkBroadcastUtils;
 use pocketmine\network\mcpe\protocol\AddActorPacket;
@@ -1720,7 +1722,16 @@ abstract class Entity{
 	 * @param Player[]|null $targets
 	 */
 	public function broadcastAnimation(Animation $animation, ?array $targets = null) : void{
-		NetworkBroadcastUtils::broadcastPackets($targets ?? $this->getViewers(), $animation->encode());
+		$targets = $targets ?? $this->getViewers();
+
+		if($animation instanceof ItemAnimation){
+			TypeConverter::broadcastByTypeConverter($targets, function(TypeConverter $typeConverter) use ($animation) : array{
+				$animation->setItemTranslator($typeConverter->getItemTranslator());
+				return $animation->encode();
+			});
+		}else{
+			NetworkBroadcastUtils::broadcastPackets($targets, $animation->encode());
+		}
 	}
 
 	/**

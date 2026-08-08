@@ -190,6 +190,7 @@ class NetworkSession{
 	/** @phpstan-var \SplQueue<array{CompressBatchPromise|string, list<PromiseResolver<true>>, bool}> */
 	private \SplQueue $compressedQueue;
 	private bool $forceAsyncCompression = true;
+	private ?int $protocolId = null;
 	private bool $enableCompression = false; //disabled until handshake completed
 
 	private int $nextAckReceiptId = 0;
@@ -383,6 +384,18 @@ class NetworkSession{
 		return false;
 	}
 
+	public function setProtocolId(int $protocolId) : void{
+		$this->protocolId = $protocolId;
+
+		$this->typeConverter = TypeConverter::getInstance($protocolId);
+		$this->broadcaster = $this->server->getPacketBroadcaster($protocolId);
+		$this->entityEventBroadcaster = $this->server->getEntityEventBroadcaster($this->broadcaster, $this->typeConverter);
+	}
+
+	public function getProtocolId() : int{
+		return $this->protocolId ?? ProtocolInfo::CURRENT_PROTOCOL;
+	}
+
 	/**
 	 * @throws PacketHandlingException
 	 */
@@ -412,22 +425,36 @@ class NetworkSession{
 			}
 
 			if($this->enableCompression){
-				$compressionType = ord($payload[0]);
-				$compressed = substr($payload, 1);
-				if($compressionType === CompressionAlgorithm::NONE){
-					$decompressed = $compressed;
-				}elseif($compressionType === $this->compressor->getNetworkId()){
+				if($this->getProtocolId() >= ProtocolInfo::PROTOCOL_1_20_60){
+					$compressionType = ord($payload[0]);
+					$compressed = substr($payload, 1);
+					if($compressionType === CompressionAlgorithm::NONE){
+						$decompressed = $compressed;
+					}elseif($compressionType === $this->compressor->getNetworkId()){
+						Timings::$playerNetworkReceiveDecompress->startTiming();
+						try{
+							$decompressed = $this->compressor->decompress($compressed);
+						}catch(DecompressionException $e){
+							$this->logger->debug("Failed to decompress packet: " . base64_encode($compressed));
+							throw PacketHandlingException::wrap($e, "Compressed packet batch decode error");
+						}finally{
+							Timings::$playerNetworkReceiveDecompress->stopTiming();
+						}
+					}else{
+						throw new PacketHandlingException("Packet compressed with unexpected compression type $compressionType");
+					}
+				}else{
+					//pre-1.20.60 batches don't have a compression type header - they're always compressed with the
+					//compressor negotiated during session start
 					Timings::$playerNetworkReceiveDecompress->startTiming();
 					try{
-						$decompressed = $this->compressor->decompress($compressed);
+						$decompressed = $this->compressor->decompress($payload);
 					}catch(DecompressionException $e){
-						$this->logger->debug("Failed to decompress packet: " . base64_encode($compressed));
+						$this->logger->debug("Failed to decompress packet: " . base64_encode($payload));
 						throw PacketHandlingException::wrap($e, "Compressed packet batch decode error");
 					}finally{
 						Timings::$playerNetworkReceiveDecompress->stopTiming();
 					}
-				}else{
-					throw new PacketHandlingException("Packet compressed with unexpected compression type $compressionType");
 				}
 			}else{
 				$decompressed = $payload;
@@ -532,7 +559,7 @@ class NetworkSession{
 			try{
 				$stream = new ByteBufferReader($buffer);
 				try{
-					$packet->decode($stream);
+					$packet->decode($stream, $this->getProtocolId());
 				}catch(PacketDecodeException $e){
 					throw PacketHandlingException::wrap($e);
 				}
@@ -610,7 +637,7 @@ class NetworkSession{
 			$writer = new ByteBufferWriter();
 			foreach($packets as $evPacket){
 				$writer->clear(); //memory reuse let's gooooo
-				$this->addToSendBuffer(self::encodePacketTimed($writer, $evPacket));
+				$this->addToSendBuffer(self::encodePacketTimed($writer, $this->getProtocolId(), $evPacket));
 			}
 			if($immediate){
 				$this->flushGamePacketQueue();
@@ -643,11 +670,11 @@ class NetworkSession{
 	/**
 	 * @internal
 	 */
-	public static function encodePacketTimed(ByteBufferWriter $serializer, ClientboundPacket $packet) : string{
+	public static function encodePacketTimed(ByteBufferWriter $serializer, int $protocolId, ClientboundPacket $packet) : string{
 		$timings = Timings::getEncodeDataPacketTimings($packet);
 		$timings->startTiming();
 		try{
-			$packet->encode($serializer);
+			$packet->encode($serializer, $protocolId);
 			return $serializer->getData();
 		}finally{
 			$timings->stopTiming();
@@ -674,7 +701,7 @@ class NetworkSession{
 				PacketBatch::encodeRaw($stream, $this->sendBuffer);
 
 				if($this->enableCompression){
-					$batch = $this->server->prepareBatch($stream->getData(), $this->compressor, $syncMode, Timings::$playerNetworkSendCompressSessionBuffer);
+					$batch = $this->server->prepareBatch($stream->getData(), $this->getProtocolId(), $this->compressor, $syncMode, Timings::$playerNetworkSendCompressSessionBuffer);
 				}else{
 					$batch = $stream->getData();
 				}
@@ -1196,7 +1223,7 @@ class NetworkSession{
 				CommandPermissions::NORMAL,
 				$aliasObj,
 				[
-					new CommandOverload(chaining: false, parameters: [CommandParameter::standard("args", AvailableCommandsPacket::ARG_TYPE_RAWTEXT, 0, true)])
+					new CommandOverload(chaining: false, parameters: [CommandParameter::standard("args", AvailableCommandsPacket::convertArg($this->getProtocolId(), AvailableCommandsPacket::ARG_TYPE_RAWTEXT), 0, true)])
 				],
 				chainedSubCommandData: []
 			);
@@ -1280,7 +1307,7 @@ class NetworkSession{
 	 */
 	public function startUsingChunk(int $chunkX, int $chunkZ, \Closure $onCompletion) : void{
 		$world = $this->player->getLocation()->getWorld();
-		$promiseOrPacket = ChunkCache::getInstance($world, $this->compressor)->request($chunkX, $chunkZ);
+		$promiseOrPacket = ChunkCache::getInstance($world, $this->compressor)->request($chunkX, $chunkZ, $this->getTypeConverter());
 		if(is_string($promiseOrPacket)){
 			$this->sendChunkPacket($promiseOrPacket, $onCompletion, $world);
 			return;
@@ -1349,7 +1376,7 @@ class NetworkSession{
 
 	public function onPlayerRemoved(Player $p) : void{
 		if($p !== $this->player){
-			$this->sendDataPacket(PlayerListPacket::remove([$p->getUniqueId()]));
+			$this->sendDataPacket(PlayerListPacket::remove([PlayerListEntry::createRemovalEntry($p->getUniqueId())]));
 		}
 	}
 
