@@ -104,6 +104,7 @@ use pocketmine\updater\UpdateChecker;
 use pocketmine\utils\AssumptionFailedError;
 use pocketmine\utils\BroadcastLoggerForwarder;
 use pocketmine\utils\Config;
+use pocketmine\utils\DiscordCrashNotifier;
 use pocketmine\utils\Filesystem;
 use pocketmine\utils\Internet;
 use pocketmine\utils\MainLogger;
@@ -127,7 +128,9 @@ use pocketmine\YmlServerProperties as Yml;
 use Ramsey\Uuid\UuidInterface;
 use Symfony\Component\Filesystem\Path;
 use function array_fill;
+use function array_filter;
 use function array_sum;
+use function array_values;
 use function base64_encode;
 use function chr;
 use function cli_set_process_title;
@@ -159,7 +162,6 @@ use function realpath;
 use function register_shutdown_function;
 use function rename;
 use function round;
-use function sleep;
 use function spl_object_id;
 use function sprintf;
 use function str_repeat;
@@ -174,7 +176,6 @@ use function touch;
 use function trim;
 use function yaml_parse;
 use const DIRECTORY_SEPARATOR;
-use const PHP_EOL;
 use const PHP_INT_MAX;
 
 /**
@@ -307,6 +308,13 @@ class Server{
 	 * @phpstan-var array<string, array<int, CommandSender>>
 	 */
 	private array $broadcastSubscribers = [];
+
+	/**
+	 * Strife patch: unix timestamps of recent tick errors, used to detect crash loops
+	 * @var int[]
+	 * @phpstan-var list<int>
+	 */
+	private array $tickCrashTimes = [];
 
 	public function getName() : string{
 		return VersionInfo::NAME;
@@ -1638,6 +1646,10 @@ class Server{
 			"thread" => $thread
 		];
 
+		//Strife patch: report crashes to Discord - the server stays alive now, so nobody
+		//would otherwise notice (see crashDump()/tickProcessor())
+		DiscordCrashNotifier::notifyException($e);
+
 		global $lastExceptionError, $lastError;
 		$lastExceptionError = $lastError;
 		$this->crashDump();
@@ -1734,19 +1746,9 @@ class Server{
 			}catch(\Throwable $e){}
 		}
 
-		$this->forceShutdown();
-		$this->isRunning = false;
-
-		//Force minimum uptime to be >= 120 seconds, to reduce the impact of spammy crash loops
-		$uptime = time() - ((int) $this->startTime);
-		$minUptime = 120;
-		$spacing = $minUptime - $uptime;
-		if($spacing > 0){
-			echo "--- Uptime {$uptime}s - waiting {$spacing}s to throttle automatic restart (you can kill the process safely now) ---" . PHP_EOL;
-			sleep($spacing);
-		}
-		@Process::kill(Process::pid());
-		exit(1);
+		//Strife patch: no forceShutdown()/exit here anymore - a crash dump is written and
+		//reported, but the server keeps running. tickProcessor() catches tick errors and
+		//only shuts down on a genuine crash loop.
 	}
 
 	/**
@@ -1764,10 +1766,27 @@ class Server{
 		$this->nextTick = microtime(true);
 
 		while($this->isRunning){
-			$this->tick();
+			try{
+				$this->tick();
 
-			//sleeps are self-correcting - if we undersleep 1ms on this tick, we'll sleep an extra ms on the next tick
-			$this->tickSleeper->sleepUntil($this->nextTick);
+				//sleeps are self-correcting - if we undersleep 1ms on this tick, we'll sleep an extra ms on the next tick
+				$this->tickSleeper->sleepUntil($this->nextTick);
+			}catch(\Throwable $e){
+				//Strife patch: keep the server alive on unexpected errors (crash dump is still
+				//written and reported to Discord by exceptionHandler()), but bail out of an
+				//obvious crash loop: more than 20 errors within 5 seconds
+				$now = time();
+				$this->tickCrashTimes[] = $now;
+				$this->tickCrashTimes = array_values(array_filter($this->tickCrashTimes, fn(int $t) : bool => $t > $now - 5));
+
+				$this->exceptionHandler($e);
+
+				if(count($this->tickCrashTimes) > 20){
+					$this->logger->emergency("Crash loop detected (more than 20 errors in 5 seconds), shutting down");
+					DiscordCrashNotifier::notifyMessage("Crash loop detected (more than 20 errors in 5 seconds), shutting down");
+					$this->forceShutdown();
+				}
+			}
 		}
 	}
 

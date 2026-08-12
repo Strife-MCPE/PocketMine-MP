@@ -40,6 +40,7 @@ use pocketmine\player\GameMode;
 use pocketmine\Server;
 use pocketmine\thread\ThreadCrashException;
 use pocketmine\timings\Timings;
+use pocketmine\utils\DiscordCrashNotifier;
 use pocketmine\utils\Utils;
 use pocketmine\YmlServerProperties;
 use raklib\generic\DisconnectReason;
@@ -229,7 +230,18 @@ class RakLibInterface implements ServerEventListener, AdvancedNetworkInterface{
 			}catch(\Throwable $e){
 				//record the name of the player who caused the crash, to make it easier to find the reproducing steps
 				$this->server->getLogger()->emergency("Crash occurred while handling a packet from session: $name");
-				throw $e;
+				$this->server->getLogger()->logException($e);
+
+				//Strife patch: don't take the whole server down for a crash triggered by a
+				//single client's packet - report it to Discord and drop only that session.
+				//Not rethrowing also keeps player-triggerable crashes from generating crash
+				//dumps or tripping the tick crash-loop shutdown.
+				DiscordCrashNotifier::notifyException($e, "Crash occurred while handling a packet from session: $name");
+				try{
+					$session->disconnectWithError(reason: "Internal server error while handling a packet");
+				}catch(\Throwable){
+					//session is likely in a broken state already - nothing more we can do
+				}
 			}
 		}
 	}
