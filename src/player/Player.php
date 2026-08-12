@@ -1956,10 +1956,12 @@ class Player extends Human implements CommandSender, ChunkListener, IPlayer, Nev
 			$item = $this->inventory->getItemInHand(); //this is a copy of the real item
 			$oldItem = clone $item;
 			$returnedItems = [];
-			if($this->getWorld()->useItemOn($pos, $item, $face, $clickOffset, $this, true, $returnedItems)){
+			$useItemOn = $this->getWorld()->useItemOn($pos, $item, $face, $clickOffset, $this, true, $returnedItems);
+			if($useItemOn === ItemUseResult::SUCCESS()){
 				$this->returnItemsFromAction($oldItem, $item, $returnedItems);
 				return true;
 			}
+			return $useItemOn === ItemUseResult::NONE();
 		}else{
 			$this->logger->debug("Cancelled interaction of block at $pos due to not currently being interactable");
 		}

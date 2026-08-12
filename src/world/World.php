@@ -2239,7 +2239,7 @@ class World implements ChunkManager{
 	 * @param bool        $playSound      Whether to play a block-place sound if the block was placed successfully.
 	 * @param Item[]      &$returnedItems Items to be added to the target's inventory (or dropped if the inventory is full)
 	 */
-	public function useItemOn(Vector3 $vector, Item &$item, int $face, ?Vector3 $clickVector = null, ?Player $player = null, bool $playSound = false, array &$returnedItems = []) : bool{
+	public function useItemOn(Vector3 $vector, Item &$item, int $face, ?Vector3 $clickVector = null, ?Player $player = null, bool $playSound = false, array &$returnedItems = []) : ItemUseResult{
 		$blockClicked = $this->getBlock($vector);
 		$blockReplace = $blockClicked->getSide($face);
 
@@ -2255,16 +2255,16 @@ class World implements ChunkManager{
 
 		if(!$this->isInWorld($blockReplace->getPosition()->x, $blockReplace->getPosition()->y, $blockReplace->getPosition()->z)){
 			//TODO: build height limit messages for custom world heights and mcregion cap
-			return false;
+			return ItemUseResult::FAIL();
 		}
 		$chunkX = $blockReplace->getPosition()->getFloorX() >> Chunk::COORD_BIT_SIZE;
 		$chunkZ = $blockReplace->getPosition()->getFloorZ() >> Chunk::COORD_BIT_SIZE;
 		if(!$this->isChunkLoaded($chunkX, $chunkZ) || $this->isChunkLocked($chunkX, $chunkZ)){
-			return false;
+			return ItemUseResult::FAIL();
 		}
 
 		if($blockClicked->getTypeId() === BlockTypeIds::AIR){
-			return false;
+			return ItemUseResult::FAIL();
 		}
 
 		if($player !== null){
@@ -2280,24 +2280,24 @@ class World implements ChunkManager{
 			$ev->call();
 			if(!$ev->isCancelled()){
 				if($ev->useBlock() && $blockClicked->onInteract($item, $face, $clickVector, $player, $returnedItems)){
-					return true;
+					return ItemUseResult::SUCCESS();
 				}
 
 				if($ev->useItem()){
 					$result = $item->onInteractBlock($player, $blockReplace, $blockClicked, $face, $clickVector, $returnedItems);
 					if($result !== ItemUseResult::NONE){
-						return $result === ItemUseResult::SUCCESS;
+						return $result;
 					}
 				}
 			}else{
-				return false;
+				return ItemUseResult::FAIL();
 			}
 		}elseif($blockClicked->onInteract($item, $face, $clickVector, $player, $returnedItems)){
-			return true;
+			return ItemUseResult::SUCCESS();
 		}
 
 		if($item->isNull() || !$item->canBePlaced()){
-			return false;
+			return ItemUseResult::FAIL();
 		}
 
 		//TODO: while passing Facing::UP mimics the vanilla behaviour with replaceable blocks, we should really pass
@@ -2308,14 +2308,14 @@ class World implements ChunkManager{
 			$item->getPlacementTransaction($blockReplace, $blockClicked, $face, $clickVector, $player);
 		if($tx === null){
 			//no placement options available
-			return false;
+			return ItemUseResult::FAIL();
 		}
 
 		foreach($tx->getBlocks() as [$x, $y, $z, $block]){
 			$block->position($this, $x, $y, $z);
 			foreach($block->getCollisionBoxes() as $collisionBox){
 				if(count($this->getCollidingEntities($collisionBox)) > 0){
-					return false;  //Entity in block
+					return ItemUseResult::NONE();  //Entity in block
 				}
 			}
 		}
@@ -2344,12 +2344,12 @@ class World implements ChunkManager{
 
 			$ev->call();
 			if($ev->isCancelled()){
-				return false;
+				return ItemUseResult::FAIL();
 			}
 		}
 
 		if(!$tx->apply()){
-			return false;
+			return ItemUseResult::FAIL();
 		}
 		$first = true;
 		foreach($tx->getBlocks() as [$x, $y, $z, $_]){
@@ -2369,7 +2369,7 @@ class World implements ChunkManager{
 
 		$item->pop();
 
-		return true;
+		return ItemUseResult::SUCCESS();
 	}
 
 	public function getEntity(int $entityId) : ?Entity{
