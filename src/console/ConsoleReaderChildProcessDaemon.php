@@ -107,7 +107,11 @@ final class ConsoleReaderChildProcessDaemon{
 		$r = [$this->socket];
 		$w = null;
 		$e = null;
-		if(stream_select($r, $w, $e, 0, 0) === 1){
+		//Strife patch: stream_select() fails with EINTR when the process is hit by a signal (e.g. SIGWINCH from a
+		//terminal resize while attached to the container). That's harmless for a zero-timeout poll - suppress the
+		//warning (which the global handler would otherwise turn into a server-killing ErrorException) and treat
+		//false as "nothing to read"; we poll again next tick anyway.
+		if(@stream_select($r, $w, $e, 0, 0) === 1){
 			$line = fgets($this->socket);
 			if($line === false){
 				$this->logger->debug("Lost connection to subprocess, restarting (maybe the child process was killed from outside?)");
