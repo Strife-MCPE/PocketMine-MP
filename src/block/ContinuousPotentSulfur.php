@@ -23,29 +23,26 @@ declare(strict_types=1);
 
 namespace pocketmine\block;
 
-use pocketmine\block\utils\AnalogRedstoneSignalEmitter;
-use pocketmine\block\utils\AnalogRedstoneSignalEmitterTrait;
-use pocketmine\block\utils\StaticSupportTrait;
-use pocketmine\item\Item;
-use pocketmine\item\VanillaItems;
-use pocketmine\math\Facing;
+use pocketmine\world\sound\GeyserContinuousEruptionBurstSound;
+use pocketmine\world\sound\GeyserContinuousEruptionStartSound;
+use pocketmine\world\sound\Sound;
 
-class RedstoneWire extends Flowable implements AnalogRedstoneSignalEmitter{
-	use AnalogRedstoneSignalEmitterTrait;
-	use StaticSupportTrait;
+final class ContinuousPotentSulfur extends EruptivePotentSulfur{
 
-	public function readStateFromWorld() : Block{
-		parent::readStateFromWorld();
-		//TODO: check connections to nearby redstone components
-
-		return $this;
+	public function isErupting() : bool{
+		return $this->findGeyserOutlet() !== null;
 	}
 
-	private function canBeSupportedAt(Block $block) : bool{
-		return $block->getAdjacentSupportType(Facing::DOWN)->hasEdgeSupport();
+	protected function onGeyserVariantApplied() : void{
+		parent::onGeyserVariantApplied();
+		$this->position->getWorld()->addSound($this->position->add(0.5, 0.5, 0.5), $this->getEruptionStartSound());
 	}
 
-	public function asItem() : Item{
-		return VanillaItems::REDSTONE_DUST();
+	public function getEruptionStartSound() : Sound{
+		return new GeyserContinuousEruptionStartSound();
+	}
+
+	public function getEruptionBurstSound() : Sound{
+		return new GeyserContinuousEruptionBurstSound();
 	}
 }

@@ -119,6 +119,7 @@ use pocketmine\world\format\io\WorldProviderManager;
 use pocketmine\world\format\io\WritableWorldProviderManagerEntry;
 use pocketmine\world\generator\Generator;
 use pocketmine\world\generator\GeneratorManager;
+use pocketmine\world\generator\GeneratorManagerEntry;
 use pocketmine\world\generator\InvalidGeneratorOptionsException;
 use pocketmine\world\Position;
 use pocketmine\world\World;
@@ -1137,7 +1138,7 @@ class Server{
 	}
 
 	private function startupPrepareWorlds() : bool{
-		$getGenerator = function(string $generatorName, string $generatorOptions, string $worldName) : ?string{
+		$getGeneratorEntry = function(string $generatorName, string $generatorOptions, string $worldName) : ?GeneratorManagerEntry{
 			$generatorEntry = GeneratorManager::getInstance()->getGenerator($generatorName);
 			if($generatorEntry === null){
 				$this->logger->error($this->language->translate(KnownTranslationFactory::pocketmine_level_generationError(
@@ -1155,7 +1156,7 @@ class Server{
 				)));
 				return null;
 			}
-			return $generatorEntry->getGeneratorClass();
+			return $generatorEntry;
 		};
 
 		$anyWorldFailedToLoad = false;
@@ -1183,12 +1184,12 @@ class Server{
 				$generatorName = $options["generator"] ?? "default";
 				$generatorOptions = isset($options["preset"]) && is_string($options["preset"]) ? $options["preset"] : "";
 
-				$generatorClass = $getGenerator($generatorName, $generatorOptions, $name);
-				if($generatorClass === null){
+				$generatorEntry = $getGeneratorEntry($generatorName, $generatorOptions, $name);
+				if($generatorEntry === null){
 					$anyWorldFailedToLoad = true;
 					continue;
 				}
-				$creationOptions->setGeneratorClass($generatorClass);
+				$creationOptions->setGeneratorClass($generatorEntry->getGeneratorClass());
 				$creationOptions->setGeneratorOptions($generatorOptions);
 
 				$creationOptions->setDifficulty($this->getDifficulty());
@@ -1201,6 +1202,11 @@ class Server{
 					if($convertedSeed !== null){
 						$creationOptions->setSeed($convertedSeed);
 					}
+				}
+
+				$spawnPosition = $generatorEntry->getSpawnPosition($creationOptions->getSeed());
+				if($spawnPosition !== null){
+					$creationOptions->setSpawnPosition($spawnPosition);
 				}
 
 				$this->worldManager->generateWorld($name, $creationOptions);
@@ -1222,20 +1228,26 @@ class Server{
 				}
 				$generatorName = $this->configGroup->getConfigString(ServerProperties::DEFAULT_WORLD_GENERATOR);
 				$generatorOptions = $this->configGroup->getConfigString(ServerProperties::DEFAULT_WORLD_GENERATOR_SETTINGS);
-				$generatorClass = $getGenerator($generatorName, $generatorOptions, $default);
+				$generatorEntry = $getGeneratorEntry($generatorName, $generatorOptions, $default);
 
-				if($generatorClass === null){
+				if($generatorEntry === null){
 					$this->logger->emergency($this->language->translate(KnownTranslationFactory::pocketmine_level_defaultError()));
 					return false;
 				}
 				$creationOptions = WorldCreationOptions::create()
-					->setGeneratorClass($generatorClass)
+					->setGeneratorClass($generatorEntry->getGeneratorClass())
 					->setGeneratorOptions($generatorOptions);
 				$convertedSeed = Generator::convertSeed($this->configGroup->getConfigString(ServerProperties::DEFAULT_WORLD_SEED));
 				if($convertedSeed !== null){
 					$creationOptions->setSeed($convertedSeed);
 				}
 				$creationOptions->setDifficulty($this->getDifficulty());
+
+				$spawnPosition = $generatorEntry->getSpawnPosition($creationOptions->getSeed());
+				if($spawnPosition !== null){
+					$creationOptions->setSpawnPosition($spawnPosition);
+				}
+
 				$this->worldManager->generateWorld($default, $creationOptions);
 			}
 

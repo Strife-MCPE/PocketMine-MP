@@ -23,38 +23,21 @@ declare(strict_types=1);
 
 namespace pocketmine\block;
 
-use pocketmine\block\utils\SupportType;
 use pocketmine\item\Item;
 use pocketmine\math\AxisAlignedBB;
 use pocketmine\math\Facing;
 
-class GrassPath extends Transparent{
+final class HeavyCore extends Transparent{
+	//TODO: Waterlogging!
 
 	protected function recalculateCollisionBoxes() : array{
-		return [AxisAlignedBB::one()->trim(Facing::UP, 1 / 16)];
-	}
-
-	public function getSupportType(int $facing) : SupportType{
-		return match($facing){
-			Facing::UP => SupportType::EDGE,
-			Facing::DOWN => SupportType::FULL,
-			default => SupportType::NONE,
-		};
-	}
-
-	public function onNearbyBlockChange() : void{
-		if($this->getSide(Facing::UP)->isSolid()){
-			$this->position->getWorld()->setBlock($this->position, VanillaBlocks::DIRT());
-		}
-	}
-
-	public function getDropsForCompatibleTool(Item $item) : array{
-		return [
-			VanillaBlocks::DIRT()->asItem()
+		return [AxisAlignedBB::one()
+			->contract(0.25, 0, 0.25)
+			->trim(Facing::UP, 0.5)
 		];
 	}
 
-	public function isAffectedBySilkTouch() : bool{
-		return true;
+	public function getDropsForIncompatibleTool(Item $item) : array{
+		return [$this->asItem()];
 	}
 }
